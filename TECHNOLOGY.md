@@ -96,7 +96,7 @@ This document lists the main technologies used in OpenIM Server, what they do, h
 | Technology | Description | Communication | Notes |
 |------------|-------------|----------------|-------|
 | **etcd** (`go.etcd.io/etcd/client/v3`) | Distributed key-value store used for service discovery and (optionally) distributed locking. RPCs register themselves; API and gateway discover RPC endpoints. | **gRPC** to etcd cluster (v3 API). Keys used for service registration and lookup. | When `Discovery.Enable == ETCD`; standalone mode uses in-memory discovery. |
-| **openimsdk/tools discovery** | Abstraction over etcd (and standalone). Provides `GetConn(ctx, serviceName)` for gRPC client connections. | Same as etcd when in use. | `pkg/common/discovery/discoveryregister.go`; dial timeout and auth configurable. |
+| **openimsdk/tools discovery** | Abstraction over etcd (and standalone). Provides `GetConn(ctx, serviceName)` for gRPC client connections. | Same as etcd when in use. | [pkg/common/discovery/discoveryregister.go](https://github.com/openimsdk/open-im-server/blob/main/pkg/common/discovery/discoveryregister.go); dial timeout and auth configurable. |
 
 **Protocols:** etcd v3 API over gRPC; services register under configurable prefixes.
 
@@ -107,7 +107,7 @@ This document lists the main technologies used in OpenIM Server, what they do, h
 | Technology | Description | Communication | Notes |
 |------------|-------------|----------------|-------|
 | **Apache Kafka** | Distributed log/queue. Used for message pipeline: openim-rpc-msg produces to **ToRedisTopic**; openim-msgtransfer consumes it and produces to **ToMongoTopic** and **ToPushTopic**; openim-push consumes **ToPushTopic**. | **Kafka protocol** (TCP); producer/consumer groups. | Topics: ToRedisTopic, ToMongoTopic, ToPushTopic, ToOfflinePushTopic (config-driven names). |
-| **IBM Sarama** (`github.com/IBM/sarama`) | Go client for Kafka (producers and consumers). | Kafka protocol. | Used via `pkg/mqbuild` and storage controllers; sync producer for msg, consumer groups for transfer and push. |
+| **IBM Sarama** (`github.com/IBM/sarama`) | Go client for Kafka (producers and consumers). | Kafka protocol. | Used via [pkg/mqbuild](https://github.com/openimsdk/open-im-server/tree/main/pkg/mqbuild) and storage controllers; sync producer for msg, consumer groups for transfer and push. |
 
 **Protocols:** Kafka wire protocol over TCP; message key (e.g. conversation key) for partitioning and ordering.
 
@@ -123,7 +123,7 @@ This document lists the main technologies used in OpenIM Server, what they do, h
 |------------|-------------|----------------|-------|
 | **Redis** (`github.com/redis/go-redis/v9`) | In-memory store for cache and transient data: user/group/friend/conversation/msg cache, token cache, seq, RocksCache metadata. | **Redis protocol** (RESP over TCP). | Single or cluster; used by RPCs and msgtransfer. |
 | **RocksCache** (`github.com/dtm-labs/rockscache`) | Cache-aside layer on top of Redis with strong consistency: prevents stale reads after DB updates by invalidating/locking cache keys. | Uses Redis for storage and locks; app talks to Redis. | Options: `StrongConsistency`, `LockExpire`, `WaitReplicasTimeout`, `RandomExpireAdjustment`; used for user, group, friend, conversation, msg, etc. |
-| **Local in-memory cache** (OpenIM `pkg/localcache`) | Process-local cache in front of Redis/DB to reduce latency and load. Uses LRU eviction and optional TTL. | In-process only; no network. | Slot-based sharding (hash) and optional “link” invalidation; see [Algorithms](#16-algorithms--patterns-summary). |
+| **Local in-memory cache** (OpenIM [pkg/localcache](https://github.com/openimsdk/open-im-server/tree/main/pkg/localcache)) | Process-local cache in front of Redis/DB to reduce latency and load. Uses LRU eviction and optional TTL. | In-process only; no network. | Slot-based sharding (hash) and optional “link” invalidation; see [Algorithms](#16-algorithms--patterns-summary). |
 
 **Protocols:** Redis RESP over TCP; localcache is in-process only.
 
@@ -147,7 +147,7 @@ This document lists the main technologies used in OpenIM Server, what they do, h
 
 | Technology | Description | Communication | Notes |
 |------------|-------------|----------------|-------|
-| **MinIO** | S3-compatible object storage for file uploads (images, voice, etc.). Default option. | **HTTP** (S3 API) or **HTTPS**. | Configured in `config/minio.yml`; openim-rpc-third uses it for upload/sign/complete. |
+| **MinIO** | S3-compatible object storage for file uploads (images, voice, etc.). Default option. | **HTTP** (S3 API) or **HTTPS**. | Configured in [config/minio.yml](https://github.com/openimsdk/open-im-server/blob/main/config/minio.yml); openim-rpc-third uses it for upload/sign/complete. |
 | **AWS S3** | Optional object storage backend. | S3 REST API over HTTP/HTTPS. | Via `openimsdk/tools` storage abstraction; used when configured. |
 | **Tencent COS, Aliyun OSS, Qiniu Kodo** | Optional object storage backends for different clouds. | Vendor REST APIs over HTTP/HTTPS. | Same abstraction; config in openim-rpc-third and env docs. |
 
@@ -159,7 +159,7 @@ This document lists the main technologies used in OpenIM Server, what they do, h
 
 | Technology | Description | Communication | Notes |
 |------------|-------------|----------------|-------|
-| **robfig/cron** (`github.com/robfig/cron/v3`) | Cron-style job scheduler. Runs periodic tasks (e.g. clear chat records, delete messages, clear user msg, S3 cleanup). | In-process; no network protocol. | `internal/tools/cron/cron_task.go`; expressions from config (e.g. `CronExecuteTime`). |
+| **robfig/cron** (`github.com/robfig/cron/v3`) | Cron-style job scheduler. Runs periodic tasks (e.g. clear chat records, delete messages, clear user msg, S3 cleanup). | In-process; no network protocol. | [internal/tools/cron/cron_task.go](https://github.com/openimsdk/open-im-server/blob/main/internal/tools/cron/cron_task.go); expressions from config (e.g. `CronExecuteTime`). |
 | **etcd (optional)** | Distributed lock so only one cron instance runs a task in a multi-instance deployment. | etcd gRPC. | When discovery is etcd; `ExecuteWithLock` wraps task execution. |
 
 **Algorithms / patterns:**
@@ -208,17 +208,17 @@ These are the main algorithms and design patterns used to solve specific problem
 
 ### 16.1 Message batching (Batcher)
 
-- **Where:** `pkg/tools/batcher`; used by openim-msgtransfer when consuming Kafka ToRedisTopic.
+- **Where:** [pkg/tools/batcher](https://github.com/openimsdk/open-im-server/tree/main/pkg/tools/batcher); used by openim-msgtransfer when consuming Kafka ToRedisTopic.
 - **Problem:** Process high-throughput Kafka messages efficiently without handling every message individually.
 - **Approach:**
   - **Time- and size-based batching:** A scheduler collects items until either (1) a configured **count** is reached or (2) a **time interval** elapses (ticker), then flushes.
   - **Sharding by key:** A **Sharding(key)** function (e.g. `hash(key) % workerCount`) assigns each key to a worker channel so that all messages for the same key (e.g. conversation) are processed by the same worker, preserving order and reducing lock contention.
   - **Sync wait (optional):** After distributing a batch to workers, the scheduler can wait for all workers to finish before marking the Kafka offset (sync wait), improving at-least-once semantics.
-- **Config:** Size, interval, worker count, buffer sizes (see `internal/msgtransfer/online_history_msg_handler.go` and batcher options).
+- **Config:** Size, interval, worker count, buffer sizes (see [internal/msgtransfer/online_history_msg_handler.go](https://github.com/openimsdk/open-im-server/blob/main/internal/msgtransfer/online_history_msg_handler.go) and batcher options).
 
 ### 16.2 LRU and local cache
 
-- **Where:** `pkg/localcache` and `pkg/localcache/lru`.
+- **Where:** [pkg/localcache](https://github.com/openimsdk/open-im-server/tree/main/pkg/localcache) and [pkg/localcache/lru](https://github.com/openimsdk/open-im-server/tree/main/pkg/localcache/lru).
 - **Problem:** Reduce latency and load on Redis/DB with a process-local cache while controlling memory and staleness.
 - **Approaches:**
   - **LRU eviction:** When the cache is full, least-recently-used entries are evicted (via `hashicorp/golang-lru`: `simplelru` or `expirable`).
@@ -231,7 +231,7 @@ These are the main algorithms and design patterns used to solve specific problem
 
 ### 16.3 RocksCache (strong cache consistency)
 
-- **Where:** `pkg/common/storage/cache/redis`; used by user, group, friend, conversation, msg, and other caches.
+- **Where:** [pkg/common/storage/cache/redis](https://github.com/openimsdk/open-im-server/tree/main/pkg/common/storage/cache/redis); used by user, group, friend, conversation, msg, and other caches.
 - **Problem:** Avoid returning stale data from cache after the database has been updated (cache-aside consistency).
 - **Approach:**
   - **RocksCache** (dtm-labs/rockscache): For each key, a **lock** is used around “fetch from DB and fill cache.” Other requesters **wait** on the same key’s lock or read replicas (if configured) so they see the updated value.
@@ -240,7 +240,7 @@ These are the main algorithms and design patterns used to solve specific problem
 
 ### 16.4 BBR rate limiting
 
-- **Where:** `internal/api/ratelimit.go`; uses `openimsdk/tools/stability/ratelimit/bbr`.
+- **Where:** [internal/api/ratelimit.go](https://github.com/openimsdk/open-im-server/blob/main/internal/api/ratelimit.go); uses `openimsdk/tools/stability/ratelimit/bbr`.
 - **Problem:** Protect the API from overload and improve throughput under load.
 - **Approach:** **BBR (Bandwidth-Delay)**-inspired limiter: uses observed RTT and throughput to adapt a max-in-flight (or similar) limit. When the limit is exceeded, requests get HTTP 429 and a `Retry-After` header. Headers expose BBR stats (CPU, MinRT, MaxPass, InFlight) for debugging.
 - **Config:** Window, bucket count, CPU threshold in API YAML.
@@ -250,17 +250,17 @@ These are the main algorithms and design patterns used to solve specific problem
 - **Where:** Batcher sharding, SlotLRU, conversation/user key generation, and various utilities.
 - **Usage:**
   - **Conversation key:** Deterministic key from (sendID, recvID) or groupID so that all messages for a conversation go to the same Kafka partition and same batcher shard.
-  - **ID hashing:** `pkg/util/hashutil/id.go` uses **MD5** over JSON-marshaled IDs and takes the first 8 bytes (BigEndian) as uint64 for a compact hash (e.g. for dedup or sharding).
+  - **ID hashing:** [pkg/util/hashutil/id.go](https://github.com/openimsdk/open-im-server/blob/main/pkg/util/hashutil/id.go) uses **MD5** over JSON-marshaled IDs and takes the first 8 bytes (BigEndian) as uint64 for a compact hash (e.g. for dedup or sharding).
   - **String hash for sharding:** From `openimsdk/tools/utils/stringutil.GetHashCode` (or similar) to map keys to batcher workers or LRU slots.
 
 ### 16.6 Cron and distributed lock
 
-- **Where:** `internal/tools/cron`; cron tasks (clear messages, S3, etc.).
+- **Where:** [internal/tools/cron](https://github.com/openimsdk/open-im-server/tree/main/internal/tools/cron); cron tasks (clear messages, S3, etc.).
 - **Approach:** **Cron expressions** define schedule; **etcd lock** ensures only one instance executes a given task when multiple openim-crontask instances run (leader election style).
 
 ### 16.7 Read-receipt and seq aggregation
 
-- **Where:** `internal/msgtransfer/online_history_msg_handler.go` (`doSetReadSeq`).
+- **Where:** [internal/msgtransfer/online_history_msg_handler.go](https://github.com/openimsdk/open-im-server/blob/main/internal/msgtransfer/online_history_msg_handler.go) (`doSetReadSeq`).
 - **Problem:** Persist “has read up to seq” per user per conversation without writing on every single message.
 - **Approach:** In the transfer handler, messages in a batch are scanned for read-receipt notifications; **per (conversationID, userID)** the **maximum** hasReadSeq is computed, then written once to DB (and cache) for the batch, reducing write volume.
 
