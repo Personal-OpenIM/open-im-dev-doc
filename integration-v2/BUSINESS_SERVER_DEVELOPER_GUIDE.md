@@ -1054,35 +1054,24 @@ Every request that needs data goes through **open-im-server**; there is no separ
 ```mermaid
 sequenceDiagram
     participant Client
-    participant REST as REST Gateway
-    participant ProfileHandler as Profile HTTP Handler
-    participant ProfileUC as Profile UseCase
-    participant OpenIMClient as openim Client
-    participant OpenIMAuth as open-im-server Auth RPC
-    participant OpenIMUser as open-im-server User RPC
-    participant OpenIMDB as open-im-server DB
-    participant OpenIMRedis as open-im-server Redis
+    participant BizGateway as our-business-server (REST Gateway)
+    participant BizService as our-business-server (Profile UseCase)
+    participant OpenIM as open-im-server
+    participant Redis as Redis
+    participant DB as Database
 
-    Client->>+REST: GET /api/v1/me (Header: Bearer token)
-    REST->>REST: Auth middleware: validate token
-    REST->>+ProfileHandler: GetProfile(c)
-    ProfileHandler->>ProfileHandler: userID, token from context
-    ProfileHandler->>+ProfileUC: GetProfile(ctx, userID, token)
-    ProfileUC->>OpenIMClient: WithUserToken(ctx, token)
-    OpenIMClient->>OpenIMClient: metadata.AppendToOutgoingContext(ctx, "token", token)
-    ProfileUC->>+OpenIMUser: GetDesignateUsers(ctx, req)
-    OpenIMUser->>OpenIMAuth: ParseToken (or inline validation)
-    OpenIMAuth->>OpenIMRedis: get token / session
-    OpenIMRedis-->>OpenIMAuth: ok
-    OpenIMAuth-->>OpenIMUser: user valid
-    OpenIMUser->>OpenIMDB: find users
-    OpenIMDB-->>OpenIMUser: user info
-    OpenIMUser-->>-ProfileUC: GetDesignateUsersResp
-    ProfileUC->>ProfileUC: Map to profile DTO
-    ProfileUC-->>-ProfileHandler: profile
-    ProfileHandler->>ProfileHandler: Build JSON response
-    ProfileHandler-->>-REST: 200 { user_id, nickname, ... }
-    REST-->>-Client: 200 JSON
+    Client->>+BizGateway: GET /api/v1/me (Bearer token)
+    BizGateway->>BizGateway: Auth middleware: validate token
+    BizGateway->>+BizService: GetProfile(ctx, userID, token)
+    BizService->>+OpenIM: gRPC GetDesignateUsers(ctx) [token in metadata]
+    OpenIM->>Redis: get token / session
+    Redis-->>OpenIM: ok
+    OpenIM->>DB: find user
+    DB-->>OpenIM: user info
+    OpenIM-->>-BizService: GetDesignateUsersResp
+    BizService->>BizService: Map to profile DTO
+    BizService-->>-BizGateway: profile
+    BizGateway-->>-Client: 200 JSON
 ```
 
 ### Scenario 2: Write path — business service calls open-im-server to persist data
@@ -1092,26 +1081,20 @@ New tables live in open-im-server. Our-business-server calls an RPC we add there
 ```mermaid
 sequenceDiagram
     participant Client
-    participant REST as REST Gateway
-    participant OrderHandler as Order HTTP Handler
-    participant OrderUC as Order UseCase
-    participant OpenIMClient as openim Client
-    participant OpenIMOrder as open-im-server Order RPC
-    participant OpenIMDB as open-im-server DB
+    participant BizGateway as our-business-server (REST Gateway)
+    participant BizService as our-business-server (Order UseCase)
+    participant OpenIM as open-im-server
+    participant DB as Database
 
-    Client->>+REST: POST /api/v1/orders (JSON)
-    REST->>+OrderHandler: CreateOrder(c)
-    OrderHandler->>OrderHandler: Bind JSON, get user/token from context
-    OrderHandler->>+OrderUC: CreateOrder(ctx, userID, productID, qty)
-    OrderUC->>OpenIMClient: WithUserToken(ctx, token)
-    OrderUC->>+OpenIMOrder: CreateOrder(ctx, req)
-    OpenIMOrder->>OpenIMDB: INSERT order
-    OpenIMDB-->>OpenIMOrder: OK
-    OpenIMOrder-->>-OrderUC: orderID, status
-    OrderUC-->>-OrderHandler: orderID
-    OrderHandler->>OrderHandler: Build JSON response
-    OrderHandler-->>-REST: 200 { order_id, status }
-    REST-->>-Client: 200 JSON
+    Client->>+BizGateway: POST /api/v1/orders (JSON)
+    BizGateway->>BizGateway: Auth middleware, bind JSON
+    BizGateway->>+BizService: CreateOrder(ctx, userID, productID, qty)
+    BizService->>+OpenIM: gRPC CreateOrder(ctx) [token in metadata]
+    OpenIM->>DB: INSERT order
+    DB-->>OpenIM: OK
+    OpenIM-->>-BizService: orderID, status
+    BizService-->>-BizGateway: orderID
+    BizGateway-->>-Client: 200 { order_id, status }
 ```
 
 ---
