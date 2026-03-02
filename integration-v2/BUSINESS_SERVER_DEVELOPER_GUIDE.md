@@ -2,6 +2,8 @@
 
 This guide describes how to build and operate **our-business-server** (your business logic) and **our-proto** (your single source of truth for gRPC contracts), and how they integrate with **open-im-server** (your forked IM infrastructure). All three repos work together: **our-proto** defines every gRPC contract; **open-im-server** and **our-business-server** consume it and talk to each other via gRPC.
 
+**Single database:** We do **not** run a separate database in our-business-server. There is only **one** DB connection, managed by open-im-server. If we need a new table or persistent data, we add it in open-im-server (new RPC + storage there) and call that RPC from our-business-server. No extra DB connection management in our-business-server.
+
 ---
 
 ## Table of Contents
@@ -16,7 +18,7 @@ This guide describes how to build and operate **our-business-server** (your busi
 8. [Middleware & Cross-cutting Concerns](#8-middleware--cross-cutting-concerns)
 9. [Error Handling Strategy](#9-error-handling-strategy)
 10. [Workflow — Adding a New Feature End to End](#10-workflow--adding-a-new-feature-end-to-end)
-11. [Mermaid Sequence Diagrams](#11-mermaid-sequence-diagrams)
+11. [Flow Diagram](#11-flow-diagram)
 
 ---
 
@@ -44,8 +46,7 @@ our-business-server/
 │   ├── service/                 # Business services (handlers + use cases)
 │   │   ├── orders/
 │   │   │   ├── handler.go       # gRPC method implementations
-│   │   │   ├── usecase.go       # Business logic (or "application" layer)
-│   │   │   └── repository.go    # Interface + implementation
+│   │   │   └── usecase.go       # Business logic; calls open-im-server for data
 │   │   └── notifications/
 │   │       ├── handler.go
 │   │       └── usecase.go
@@ -72,7 +73,7 @@ our-business-server/
 - **cmd/** — Entrypoints only; parse flags, load config, wire and run the gateway or gRPC server.
 - **internal/gateway/** — REST routes and middleware; handlers call into **internal/service/** use cases.
 - **internal/grpc/** — gRPC server setup and registration of service handlers.
-- **internal/service/<name>/** — One package per business service: **handler** (gRPC), **usecase** (orchestration), **repository** (persistence/outbound).
+- **internal/service/<name>/** — One package per business service: **handler** (gRPC), **usecase** (orchestration). Persistence lives in open-im-server; use cases call **internal/client/openim** (no local DB or repository).
 - **internal/client/** — gRPC clients to open-im-server (and any other external services).
 - **internal/config/** — Config structs and loading.
 
@@ -119,7 +120,7 @@ our-proto/
 
 | Concern | Location |
 |--------|----------|
-| **Services** | `internal/service/<name>/` (handler + usecase + repository) |
+| **Services** | `internal/service/<name>/` (handler + usecase; no local DB) |
 | **Handlers** | `internal/service/<name>/handler.go` (gRPC), `internal/gateway/handler/` (REST adapters) |
 | **Proto files** | Only in **our-proto**; never in our-business-server |
 | **Config** | `internal/config/` (structs), `config/*.yaml` or env |
@@ -407,6 +408,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/yourorg/our-business-server/internal/client/openim"
 	"github.com/yourorg/our-business-server/internal/config"
 	"github.com/yourorg/our-business-server/internal/grpc"
 	"github.com/yourorg/our-business-server/internal/service/order"
@@ -420,8 +422,9 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Build use case and handler (inject repo, openim client, etc.)
-	orderUC := order.NewUseCase(/* repo, openimClient */)
+	// Build openim client, then use case and handler (no local DB)
+	openimClient, _ := openim.New(ctx, cfg.OpenIM)
+	orderUC := order.NewUseCase(openimClient)
 	orderHandler := order.NewHandler(orderUC)
 
 	srv, err := grpc.NewServer(orderHandler)
@@ -439,13 +442,14 @@ func main() {
 }
 ```
 
-### 3.4 Structuring handler / usecase / repository
+### 3.4 Structuring handler / usecase (no local DB)
 
 - **Handler:** Only gRPC: parse request, call use case, map result/error to proto response and gRPC status.
-- **UseCase:** Pure business logic: orchestrate repository and external clients (e.g. open-im-server); no proto types in signatures if you prefer (use domain types and convert at the handler).
-- **Repository:** Interface in the service package, implementation in `internal/repository/` or next to the use case; talks to DB or other storage.
+- **UseCase:** Orchestrates calls to **open-im-server** (and any in-memory logic). No local repository or DB — any persistent data is stored in open-im-server. We add new tables and RPCs in open-im-server; our-business-server calls those RPCs via **internal/client/openim**.
 
-**Example use case and repository interface:**
+**Example use case calling open-im-server for data:**
+
+Assume we add an Order RPC and order table in open-im-server (we own it). Our use case calls the openim client to create/get orders; open-im-server holds the single DB connection. Extend `internal/client/openim` with an `Order()` method that returns the generated `OrderServiceClient` (from our-proto) using the same connection pattern as Auth/User.
 
 **File: `internal/service/order/usecase.go`**
 
@@ -454,36 +458,44 @@ package order
 
 import (
 	"context"
+
+	orderpb "github.com/yourorg/our-proto/gen/go/business/v1/order"
+	"github.com/yourorg/our-business-server/internal/client/openim"
 )
 
 type Order struct {
-	ID       string
-	UserID   string
+	ID        string
+	UserID    string
 	ProductID string
-	Quantity int
-	Status   string
-}
-
-type Repository interface {
-	Create(ctx context.Context, userID, productID string, quantity int) (orderID string, err error)
-	GetByID(ctx context.Context, orderID string) (*Order, error)
+	Quantity  int
+	Status    string
 }
 
 type UseCase struct {
-	repo Repository
-	// openimClient openim.Client // inject if needed
+	openim *openim.Client
 }
 
-func NewUseCase(repo Repository) *UseCase {
-	return &UseCase{repo: repo}
+func NewUseCase(openim *openim.Client) *UseCase {
+	return &UseCase{openim: openim}
 }
 
+// CreateOrder calls open-im-server's Order RPC (we add it there); open-im-server writes to its DB.
 func (uc *UseCase) CreateOrder(ctx context.Context, userID, productID string, quantity int) (string, error) {
-	return uc.repo.Create(ctx, userID, productID, quantity)
+	resp, err := uc.openim.Order().CreateOrder(ctx, &orderpb.CreateOrderRequest{
+		UserId: userID, ProductId: productID, Quantity: int32(quantity),
+	})
+	if err != nil {
+		return "", err
+	}
+	return resp.OrderId, nil
 }
 
 func (uc *UseCase) GetOrder(ctx context.Context, orderID string) (*Order, error) {
-	return uc.repo.GetByID(ctx, orderID)
+	resp, err := uc.openim.Order().GetOrder(ctx, &orderpb.GetOrderRequest{OrderId: orderID})
+	if err != nil {
+		return nil, err
+	}
+	return &Order{ID: resp.OrderId, UserID: resp.UserId, Status: resp.Status}, nil
 }
 ```
 
@@ -754,14 +766,14 @@ If you run multiple gRPC services in our-business-server (e.g. gateway + order s
 
 ```go
 // In cmd/gateway/main.go you have both orderUC and notificationUC.
-// Instead of orderUC calling notificationUC via gRPC, inject notificationUC into orderUC and call a method.
+// Order persistence goes through openim client (open-im-server); optional side-effect via notificationUC in-process.
 type OrderUseCase struct {
-	repo            order.Repository
+	openim          *openim.Client
 	notificationUC  *notification.UseCase
 }
 
 func (uc *OrderUseCase) CreateOrder(ctx context.Context, ...) (string, error) {
-	orderID, err := uc.repo.Create(ctx, ...)
+	orderID, err := uc.openim.Order().CreateOrder(ctx, req) // open-im-server writes to its DB
 	if err != nil {
 		return "", err
 	}
@@ -1020,11 +1032,11 @@ Use a helper like in §4.5: `status.FromError(err)` and map `st.Code()` and opti
 ### 3. Implement the handler in our-business-server
 
 - Add `internal/service/feedback/handler.go` implementing `feedback.FeedbackServiceServer`.
-- Add `usecase.go` and optional `repository.go`; wire in `main.go` and register in `internal/grpc/server.go`.
+- Add `usecase.go` (no local DB); wire in `main.go` and register in `internal/grpc/server.go`.
 
-### 4. Call open-im-server from that handler if needed
+### 4. Persist or read data via open-im-server
 
-- In the use case, inject `internal/client/openim.Client` and call e.g. `openimClient.User().GetDesignateUsers(ctx, req)` after attaching token to `ctx`. Map errors with `mapOpenIMError`.
+- Any new table or persistent data lives in open-im-server. Add the RPC (and storage) there; in our-business-server inject `internal/client/openim.Client` and call that RPC (e.g. `openimClient.User().GetDesignateUsers`, or a new Feedback/Order RPC) after attaching token to `ctx`. Map errors with `mapOpenIMError`.
 
 ### 5. Expose via REST gateway
 
@@ -1033,36 +1045,11 @@ Use a helper like in §4.5: `status.FromError(err)` and map `st.Code()` and opti
 
 ---
 
-## 11. Mermaid Sequence Diagrams
+## 11. Flow Diagram
 
-The following two diagrams use **sequenceDiagram** format. Scenario 1: a pure business call that does **not** call open-im-server. Scenario 2: a business call that **does** call open-im-server, which in turn uses DB and Redis.
+Every request that needs data goes through **open-im-server**; there is no separate DB or repository in our-business-server. The following diagrams use **sequenceDiagram** format and show the only flow we use: client → REST gateway → business service → open-im-server (which holds the single DB and Redis).
 
-### Scenario 1: Pure business service (no open-im-server)
-
-```mermaid
-sequenceDiagram
-    participant Client
-    participant REST as REST Gateway
-    participant OrderHandler as Order HTTP Handler
-    participant OrderUC as Order UseCase
-    participant Repo as Order Repository
-    participant DB as Database
-
-    Client->>+REST: POST /api/v1/orders (JSON)
-    REST->>+OrderHandler: CreateOrder(c)
-    OrderHandler->>OrderHandler: Bind JSON, get user from context
-    OrderHandler->>+OrderUC: CreateOrder(ctx, userID, productID, qty)
-    OrderUC->>+Repo: Create(ctx, ...)
-    Repo->>DB: INSERT order
-    DB-->>Repo: OK
-    Repo-->>-OrderUC: orderID
-    OrderUC-->>-OrderHandler: orderID
-    OrderHandler->>OrderHandler: Build JSON response
-    OrderHandler-->>-REST: 200 { order_id, status }
-    REST-->>-Client: 200 JSON
-```
-
-### Scenario 2: Business service calls open-im-server
+### Scenario 1: Read path — business service calls open-im-server for user data
 
 ```mermaid
 sequenceDiagram
@@ -1098,6 +1085,35 @@ sequenceDiagram
     REST-->>-Client: 200 JSON
 ```
 
+### Scenario 2: Write path — business service calls open-im-server to persist data
+
+New tables live in open-im-server. Our-business-server calls an RPC we add there (e.g. Order); open-im-server writes to its DB. Single DB connection, no DB in our-business-server.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant REST as REST Gateway
+    participant OrderHandler as Order HTTP Handler
+    participant OrderUC as Order UseCase
+    participant OpenIMClient as openim Client
+    participant OpenIMOrder as open-im-server Order RPC
+    participant OpenIMDB as open-im-server DB
+
+    Client->>+REST: POST /api/v1/orders (JSON)
+    REST->>+OrderHandler: CreateOrder(c)
+    OrderHandler->>OrderHandler: Bind JSON, get user/token from context
+    OrderHandler->>+OrderUC: CreateOrder(ctx, userID, productID, qty)
+    OrderUC->>OpenIMClient: WithUserToken(ctx, token)
+    OrderUC->>+OpenIMOrder: CreateOrder(ctx, req)
+    OpenIMOrder->>OpenIMDB: INSERT order
+    OpenIMDB-->>OpenIMOrder: OK
+    OpenIMOrder-->>-OrderUC: orderID, status
+    OrderUC-->>-OrderHandler: orderID
+    OrderHandler->>OrderHandler: Build JSON response
+    OrderHandler-->>-REST: 200 { order_id, status }
+    REST-->>-Client: 200 JSON
+```
+
 ---
 
-**End of guide.** For open-im-server-specific details (adding RPCs, discovery, config), see [ADDING_A_SERVICE_DEVELOPER_GUIDE.md](ADDING_A_SERVICE_DEVELOPER_GUIDE.md) and [DEVELOPER.md](DEVELOPER.md).
+**End of guide.** For open-im-server-specific details (adding RPCs, discovery, config), see [ADDING_A_SERVICE_DEVELOPER_GUIDE.md](ADDING_A_SERVICE_DEVELOPER_GUIDE.md) and [DEVELOPER.md](README.md).
