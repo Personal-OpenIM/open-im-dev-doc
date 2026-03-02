@@ -1099,4 +1099,4 @@ sequenceDiagram
 
 ---
 
-**End of guide.** For open-im-server-specific details (adding RPCs, discovery, config), see [ADDING_A_SERVICE_DEVELOPER_GUIDE.md](ADDING_A_SERVICE_DEVELOPER_GUIDE.md) and [DEVELOPER.md](README.md).
+**End of guide.** For open-im-server-specific details (adding RPCs, discovery, config), see [ADDING_A_SERVICE_DEVELOPER_GUIDE.md](ADDING_A_SERVICE_DEVELOPER_GUIDE.md) and [DEVELOPER.md](../README.md).
