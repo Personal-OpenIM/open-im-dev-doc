@@ -48,7 +48,7 @@ There are four distinct tokens in this system across two servers. They serve dif
 
 - Issued by our-admin-server (or a dedicated identity provider) after admin login
 - Signed JWT (RS256 or HS256) with claims: `admin_id`, `role`, `exp`, `iat`
-- Short-lived TTL (e.g. 1 hour) — admins are expected to re-authenticate or use a refresh token
+- Short-lived TTL (e.g. 1 hour) — when it expires, the admin must log in again (no refresh or sliding)
 - Verified on every request using the public key or shared secret — stateless, no Redis lookup needed
 - Has nothing to do with OpenIM directly
 
@@ -60,7 +60,7 @@ There are four distinct tokens in this system across two servers. They serve dif
 
 **Best practices for admin JWT:**
 - Use RS256 (asymmetric) so the public key can be shared without exposing the signing key
-- Keep TTL short (1 hour max) — use a separate refresh token flow for re-issue
+- Keep TTL short (1 hour max)
 - Include a `jti` (JWT ID) claim and maintain a small denylist in Redis for explicit revocation (logout, compromise)
 - Never put sensitive data in JWT claims — treat them as public
 
@@ -209,8 +209,8 @@ func generateSessionToken() (raw string, hashed string, err error) {
 1. Admin submits credentials (username + password, or SSO)
 2. our-admin-server verifies credentials
 3. Issues a signed JWT (RS256) with claims: admin_id, role, exp, iat, jti
-4. Optionally issues a separate refresh token (opaque, stored in Redis) for re-issue
-5. Admin sends JWT as Bearer token on every subsequent request
+4. Admin sends JWT as Bearer token on every subsequent request
+5. When the JWT expires, the admin must log in again
 ```
 
 #### Middleware on every request
@@ -241,18 +241,6 @@ type AdminClaims struct {
     Role    string `json:"role"`
     jwt.RegisteredClaims
 }
-```
-
-#### Admin refresh token flow
-
-Since admin JWTs are short-lived (1 hour), use a separate opaque refresh token to re-issue without forcing re-login:
-
-```
-1. Admin JWT expires
-2. Client sends refresh token to POST /auth/refresh
-3. our-admin-server validates refresh token in Redis (not expired, not revoked)
-4. Issues a new JWT
-5. Optionally rotates the refresh token (single-use refresh tokens)
 ```
 
 #### Best practices for admin JWT
@@ -298,17 +286,19 @@ func UserTokenInterceptor(token string) grpc.UnaryClientInterceptor {
 
 When a user registers on our-business-server, they must also be created in open-im-server so they exist in the IM system. This happens in the same registration flow, transparently.
 
+**User persistence:** We use the **existing open-im-server user collection** and add any extra fields we need (e.g. app-specific profile data). There is a single user record per user in open-im-server; no separate "app user" collection. This keeps one source of truth and avoids syncing two user stores.
+
 ```
 1. User submits registration to our-business-server
-2. our-business-server creates the user in its own flow (DH setup, etc.)
+2. our-business-server completes its flow (DH setup, etc.)
 3. our-business-server calls open-im-server RegisterUser (using admin token)
-4. open-im-server creates the user internally
+4. open-im-server creates/updates the user in its existing user collection (with any extra fields your schema allows)
 5. our-business-server calls open-im-server GetUserToken (using admin token) to pre-fetch the user's OpenIM token
 6. Stores OpenIM token in Redis alongside the session
-7. Registration complete — user exists in both systems
+7. Registration complete — user exists in open-im-server and session is stored in our Redis
 ```
 
-If step 3 fails, treat the registration as failed and roll back. The user must exist in both systems to function correctly.
+If step 3 fails, treat the registration as failed and roll back. The user must exist in open-im-server to function correctly.
 
 ---
 
@@ -335,7 +325,9 @@ The user only ever receives the session token. The OpenIM token is internal.
 
 ## 6. Session Management
 
-Sessions are stored in Redis with a **sliding TTL**. Every request from an active user resets the TTL so they are never logged out while active.
+**Sliding TTL applies only to end-user sessions** (our-business-server). Admin JWTs are short-lived and do not slide; when they expire, the admin logs in again.
+
+User sessions are stored in Redis with a **sliding TTL**. Every request from an active user resets the TTL so they are never logged out while active.
 
 ### 6.1 Redis session structure
 
@@ -558,9 +550,7 @@ sequenceDiagram
     Admin->>+AdminServer: POST /auth/login (username + password)
     AdminServer->>AdminServer: Verify credentials
     AdminServer->>AdminServer: Sign JWT (RS256, TTL 1h, include jti)
-    AdminServer->>AdminServer: Generate opaque refresh token
-    AdminServer->>Redis: SET refresh:{token} { adminID, role } TTL 30d
-    AdminServer-->>-Admin: { jwt, refresh_token }
+    AdminServer-->>-Admin: { jwt }
 
     Note over Admin,AdminServer: On subsequent requests
     Admin->>+AdminServer: Any request (Authorization: Bearer jwt)
@@ -570,12 +560,7 @@ sequenceDiagram
     Redis-->>AdminServer: not revoked
     AdminServer-->>-Admin: 200 OK
 
-    Note over Admin,AdminServer: When JWT expires
-    Admin->>+AdminServer: POST /auth/refresh (refresh_token)
-    AdminServer->>+Redis: GET refresh:{token}
-    Redis-->>-AdminServer: valid
-    AdminServer->>AdminServer: Sign new JWT (RS256, TTL 1h, new jti)
-    AdminServer-->>-Admin: { new_jwt }
+    Note over Admin,AdminServer: When JWT expires, admin must log in again
 ```
 
 ### 9.3 User Registration
@@ -588,7 +573,7 @@ sequenceDiagram
     participant OpenIM as open-im-server
 
     Client->>+BizServer: Register (DH credentials)
-    BizServer->>BizServer: Verify DH, create user locally
+    BizServer->>BizServer: Verify DH
     BizServer->>+OpenIM: RegisterUser(userID) [admin token]
     OpenIM-->>-BizServer: OK
     BizServer->>+OpenIM: GetUserToken(userID) [admin token]
